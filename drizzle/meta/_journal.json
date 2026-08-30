@@ -8,6 +8,13 @@
       "when": 1788101375190,
       "tag": "0000_shiny_gladiator",
       "breakpoints": true
+    },
+    {
+      "idx": 1,
+      "version": "6",
+      "when": 1788103019776,
+      "tag": "0001_sturdy_kylun",
+      "breakpoints": true
     }
   ]
 }
