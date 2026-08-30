@@ -1,4 +1,5 @@
 import { env } from "cloudflare:workers";
+import { currentMember } from "@/lib/access";
 
 const schema = [
   "CREATE TABLE IF NOT EXISTS engagements (id INTEGER PRIMARY KEY AUTOINCREMENT, customer TEXT NOT NULL, title TEXT NOT NULL, products TEXT NOT NULL, environment TEXT NOT NULL, architecture TEXT NOT NULL, status TEXT NOT NULL, owner TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL)",
@@ -18,7 +19,8 @@ const seed = [
   ["Luma Energy","Nexus upgrade planning","Nexus Repository","Azure","Migration / upgrade","Completed","Priya Shah"],
 ];
 
-export async function GET() {
+export async function GET(request: Request) {
+  if (!await currentMember(request)) return Response.json({ error: "Access denied" }, { status: 403 });
   await ready();
   const count = await env.DB.prepare("SELECT COUNT(*) AS total FROM engagements").first<{ total: number }>();
   if (!count?.total) {
@@ -30,6 +32,7 @@ export async function GET() {
 }
 
 export async function POST(request: Request) {
+  if (!await currentMember(request)) return Response.json({ error: "Access denied" }, { status: 403 });
   await ready();
   const body = await request.json();
   const required = ["customer", "title", "products", "environment", "architecture", "owner"];

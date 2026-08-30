@@ -1,6 +1,8 @@
 import { env } from "cloudflare:workers";
+import { currentMember } from "@/lib/access";
 
 export async function POST(request: Request) {
+  if (!await currentMember(request)) return Response.json({ error: "Access denied" }, { status: 403 });
   const body = await request.json();
   const required = ["engagementId", "status", "progress", "nextStep", "risk"];
   if (required.some((key) => !String(body[key] ?? "").trim())) return Response.json({ error: "Complete all weekly update fields." }, { status: 400 });

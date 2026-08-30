@@ -36,3 +36,6 @@ export const skillAssessments = sqliteTable("skill_assessments", {
   id: integer("id").primaryKey({ autoIncrement: true }),
   engineer: text("engineer").notNull(), skill: text("skill").notNull(), rating: text("rating").notNull(), evidence: text("evidence").notNull(), updatedAt: text("updated_at").notNull(),
 });
+export const teamMembers = sqliteTable("team_members", {
+  id: integer("id").primaryKey({ autoIncrement: true }), email: text("email").notNull().unique(), role: text("role").notNull(), active: integer("active").notNull(), createdAt: text("created_at").notNull(),
+});

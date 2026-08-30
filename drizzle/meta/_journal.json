@@ -15,6 +15,13 @@
       "when": 1788103019776,
       "tag": "0001_sturdy_kylun",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "6",
+      "when": 1788111681843,
+      "tag": "0002_fast_tana_nile",
+      "breakpoints": true
     }
   ]
 }
