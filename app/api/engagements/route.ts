@@ -27,7 +27,7 @@ export async function GET(request: Request) {
     const now = new Date().toISOString();
     await env.DB.batch(seed.map(([customer,title,products,environment,architecture,status,owner]) => env.DB.prepare("INSERT INTO engagements (customer,title,products,environment,architecture,status,owner,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?)").bind(customer,title,products,environment,architecture,status,owner,now,now)));
   }
-  const { results } = await env.DB.prepare("SELECT e.*, w.progress, w.next_step AS nextStep, w.risk, w.submitted_at AS submittedAt FROM engagements e LEFT JOIN weekly_updates w ON w.id = (SELECT id FROM weekly_updates WHERE engagement_id = e.id ORDER BY submitted_at DESC LIMIT 1) ORDER BY CASE e.status WHEN 'Blocked' THEN 0 WHEN 'Awaiting customer' THEN 1 WHEN 'In progress' THEN 2 ELSE 3 END, e.updated_at DESC").all();
+  const { results } = await env.DB.prepare("SELECT e.id, e.customer, e.title, e.products, e.environment, e.architecture, e.status, e.owner, e.created_at AS createdAt, e.updated_at AS updatedAt, w.progress, w.next_step AS nextStep, w.risk, w.submitted_at AS submittedAt FROM engagements e LEFT JOIN weekly_updates w ON w.id = (SELECT id FROM weekly_updates WHERE engagement_id = e.id ORDER BY submitted_at DESC LIMIT 1) ORDER BY CASE e.status WHEN 'Blocked' THEN 0 WHEN 'Awaiting customer' THEN 1 WHEN 'In progress' THEN 2 ELSE 3 END, e.updated_at DESC").all();
   return Response.json({ engagements: results });
 }
 
