@@ -22,6 +22,13 @@
       "when": 1788111681843,
       "tag": "0002_fast_tana_nile",
       "breakpoints": true
+    },
+    {
+      "idx": 3,
+      "version": "6",
+      "when": 1788331236115,
+      "tag": "0003_wet_gamma_corps",
+      "breakpoints": true
     }
   ]
 }

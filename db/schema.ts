@@ -32,6 +32,15 @@ export const runbooks = sqliteTable("runbooks", {
   id: integer("id").primaryKey({ autoIncrement: true }),
   title: text("title").notNull(), product: text("product").notNull(), environment: text("environment").notNull(), architecture: text("architecture").notNull(), approval: text("approval").notNull(), owner: text("owner").notNull(), reviewedAt: text("reviewed_at").notNull(),
 });
+export const runbookAttachments = sqliteTable("runbook_attachments", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  runbookId: integer("runbook_id").notNull(),
+  objectKey: text("object_key").notNull().unique(),
+  fileName: text("file_name").notNull(),
+  contentType: text("content_type").notNull(),
+  sizeBytes: integer("size_bytes").notNull(),
+  createdAt: text("created_at").notNull(),
+});
 export const skillAssessments = sqliteTable("skill_assessments", {
   id: integer("id").primaryKey({ autoIncrement: true }),
   engineer: text("engineer").notNull(), skill: text("skill").notNull(), rating: text("rating").notNull(), evidence: text("evidence").notNull(), updatedAt: text("updated_at").notNull(),
