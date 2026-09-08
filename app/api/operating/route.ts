@@ -271,6 +271,10 @@ export const PATCH = withErrorHandling(async (request: Request) => {
 
   // Write the audit row and apply the change in one batched transaction.
   //
+  // DO NOT split this into two run() calls. D1 executes a batch as a single
+  // transaction, which is what stops a failed UPDATE from leaving behind an
+  // audit row for a change that never applied.
+  //
   // The INSERT reads the outgoing state via `SELECT approval FROM runbooks`
   // rather than a separate query, so the recorded "from" value is exactly what
   // the UPDATE overwrites -- a read-then-write would let a concurrent approval

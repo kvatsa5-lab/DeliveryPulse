@@ -102,9 +102,16 @@ Two properties are deliberate and covered by tests:
   record of who approved something cannot be laundered by deleting the subject.
   `runbooks.id` is `AUTOINCREMENT`, which SQLite never reuses, so a retained row
   can never be misattributed to a later runbook.
-- A **refused** attempt writes nothing. The audit row and the `UPDATE` are one
-  batched transaction whose `INSERT ... SELECT` reads the outgoing state at write
-  time, so the recorded transition is always one that actually happened.
+- A **refused** attempt writes nothing. The audit row and the `UPDATE` are issued
+  as a single `env.DB.batch([...])` whose `INSERT ... SELECT` reads the outgoing
+  state at write time, so the recorded transition is always one that actually
+  happened.
+
+  This relies on **D1 `batch()` being a transaction** — verified in the local
+  runtime, where miniflare wraps every batch in `storage.transactionSync()`. If
+  that call is ever split into two separate `run()` calls, the atomicity is lost
+  and a failed `UPDATE` can leave an audit row for a change that never applied.
+  Keep them in one batch.
 
 ## Attachments
 
