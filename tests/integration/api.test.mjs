@@ -347,6 +347,128 @@ describe("runbook approval", () => {
   });
 });
 
+describe("approval audit trail", () => {
+  const history = async (id, email = APPROVER) =>
+    (await (await api(`/api/operating?type=runbook-history&id=${id}`, email)).json())
+      .records ?? [];
+
+  /** Create a runbook and return its id. */
+  async function newRunbook(label, email = APPROVER) {
+    const title = uniqueTitle(label);
+    const response = await json("/api/operating", email, {
+      type: "runbooks",
+      title,
+      product: "IQ Server",
+      environment: "AWS",
+      architecture: "HA",
+      owner: "tester",
+    });
+    return (await response.json()).id;
+  }
+
+  it("records who changed the state, and what it changed from", async (t) => {
+    if (requireServer(t)) return;
+    const id = await newRunbook("audit");
+    await json(`/api/operating?type=runbooks&id=${id}`, APPROVER, { approval: "Approved" }, "PATCH");
+
+    const [entry, ...rest] = await history(id);
+    assert.equal(rest.length, 0, "one transition should produce exactly one row");
+    assert.equal(entry.fromApproval, "Review needed");
+    assert.equal(entry.toApproval, "Approved");
+    // Attribution must come from the authenticated identity, never the body.
+    assert.equal(entry.actor, APPROVER);
+    assert.ok(!Number.isNaN(Date.parse(entry.occurredAt)), "occurredAt must be a timestamp");
+  });
+
+  it("keeps one row per transition, newest first", async (t) => {
+    if (requireServer(t)) return;
+    const id = await newRunbook("audit-chain");
+    for (const approval of ["Approved", "Review needed", "Deprecated"]) {
+      await json(`/api/operating?type=runbooks&id=${id}`, APPROVER, { approval }, "PATCH");
+    }
+
+    const entries = await history(id);
+    assert.equal(entries.length, 3);
+    assert.deepEqual(
+      entries.map((entry) => entry.toApproval),
+      ["Deprecated", "Review needed", "Approved"]
+    );
+    // Each row's "from" must be the previous row's "to" -- proving the recorded
+    // outgoing state is read at write time, not guessed.
+    assert.deepEqual(
+      entries.map((entry) => entry.fromApproval),
+      ["Review needed", "Approved", "Review needed"]
+    );
+  });
+
+  it("writes no row when the change is refused", async (t) => {
+    if (requireServer(t)) return;
+    if (!engineerSeeded) {
+      t.skip("could not add a non-approver member to the local database");
+      return;
+    }
+    const id = await newRunbook("audit-denied", ENGINEER);
+
+    const refused = await json(
+      `/api/operating?type=runbooks&id=${id}`,
+      ENGINEER,
+      { approval: "Approved" },
+      "PATCH"
+    );
+    assert.equal(refused.status, 403);
+    assert.deepEqual(
+      await history(id),
+      [],
+      "a refused attempt must not leave an approval on the record"
+    );
+  });
+
+  it("writes no row for an invalid state or a missing runbook", async (t) => {
+    if (requireServer(t)) return;
+    const id = await newRunbook("audit-invalid");
+    await json(`/api/operating?type=runbooks&id=${id}`, APPROVER, { approval: "Rubber-stamped" }, "PATCH");
+    assert.deepEqual(await history(id), []);
+
+    // A PATCH against a runbook that does not exist must 404 and log nothing.
+    const missing = await json(
+      "/api/operating?type=runbooks&id=987654",
+      APPROVER,
+      { approval: "Approved" },
+      "PATCH"
+    );
+    assert.equal(missing.status, 404);
+    assert.deepEqual(await history(987654), []);
+  });
+
+  // The trail is append-only: deleting the runbook must not erase the record of
+  // who approved it, or the log could be laundered by removing its subject.
+  it("survives deletion of the runbook it describes", async (t) => {
+    if (requireServer(t)) return;
+    const id = await newRunbook("audit-survives");
+    await json(`/api/operating?type=runbooks&id=${id}`, APPROVER, { approval: "Approved" }, "PATCH");
+
+    const deleted = await api(`/api/operating?type=runbooks&id=${id}`, APPROVER, {
+      method: "DELETE",
+    });
+    assert.equal(deleted.status, 200);
+
+    const entries = await history(id);
+    assert.equal(entries.length, 1, "the approval record must outlive the runbook");
+    assert.equal(entries[0].actor, APPROVER);
+  });
+
+  it("is not readable anonymously and validates the id", async (t) => {
+    if (requireServer(t)) return;
+    assert.equal(
+      (await api("/api/operating?type=runbook-history&id=1", null)).status,
+      403
+    );
+    const bad = await api("/api/operating?type=runbook-history&id=abc", APPROVER);
+    assert.equal(bad.status, 400);
+    assert.ok((await bad.json()).fields.id);
+  });
+});
+
 describe("runbook attachments", () => {
   it("stores an allowed document and exposes its metadata", async (t) => {
     if (requireServer(t)) return;

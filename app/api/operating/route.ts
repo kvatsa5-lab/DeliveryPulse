@@ -81,6 +81,21 @@ export const GET = withErrorHandling(async (request: Request) => {
     });
   }
 
+  // Who changed a runbook's approval state, and when. Readable by any member
+  // rather than approvers only: the point of the trail is that the team can see
+  // it, and it contains nothing the runbook list does not already expose.
+  if (type === "runbook-history") {
+    const id = parseId(new URL(request.url).searchParams.get("id"));
+    if (!id) return validationFailed({ id: "A valid runbook is required." });
+
+    const { results } = await env.DB.prepare(
+      "SELECT from_approval AS fromApproval, to_approval AS toApproval, actor, occurred_at AS occurredAt FROM runbook_approvals WHERE runbook_id = ? ORDER BY id DESC LIMIT 200"
+    )
+      .bind(id)
+      .all();
+    return Response.json({ records: results });
+  }
+
   if (type === "improvements") {
     const { results } = await env.DB.prepare(
       "SELECT id, title, category, owner, impact, status, created_at FROM improvements ORDER BY created_at DESC LIMIT 500"
@@ -252,16 +267,28 @@ export const PATCH = withErrorHandling(async (request: Request) => {
     );
   }
 
-  const existing = await env.DB.prepare("SELECT id FROM runbooks WHERE id = ?")
-    .bind(id)
-    .first<{ id: number }>();
-  if (!existing) return notFound("That runbook no longer exists.");
+  const now = new Date().toISOString();
 
-  await env.DB.prepare(
-    "UPDATE runbooks SET approval = ?, reviewed_at = ? WHERE id = ?"
-  )
-    .bind(approval, new Date().toISOString(), id)
-    .run();
+  // Write the audit row and apply the change in one batched transaction.
+  //
+  // The INSERT reads the outgoing state via `SELECT approval FROM runbooks`
+  // rather than a separate query, so the recorded "from" value is exactly what
+  // the UPDATE overwrites -- a read-then-write would let a concurrent approval
+  // land in between and log a transition that never happened.
+  //
+  // It also replaces the previous existence check: both statements share the
+  // `WHERE id = ?` predicate, so a missing runbook inserts no audit row and
+  // updates nothing, and `changes` tells us which case we are in.
+  const [audited] = await env.DB.batch([
+    env.DB.prepare(
+      "INSERT INTO runbook_approvals (runbook_id,from_approval,to_approval,actor,occurred_at) SELECT id, approval, ?, ?, ? FROM runbooks WHERE id = ?"
+    ).bind(approval, member.email, now, id),
+    env.DB.prepare(
+      "UPDATE runbooks SET approval = ?, reviewed_at = ? WHERE id = ?"
+    ).bind(approval, now, id),
+  ]);
+
+  if (!audited.meta.changes) return notFound("That runbook no longer exists.");
 
   return Response.json({ ok: true, approval });
 });

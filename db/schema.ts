@@ -85,6 +85,29 @@ export const runbookAttachments = sqliteTable(
   (table) => [index("idx_runbook_attachments_runbook_id").on(table.runbookId)]
 );
 
+/**
+ * Append-only record of every runbook approval state change.
+ *
+ * Rows are never updated or deleted -- including when the runbook itself is
+ * deleted, so the trail cannot be erased by removing its subject. There is
+ * deliberately no relation declared to `runbooks`: the row must outlive the
+ * runbook it refers to.
+ */
+export const runbookApprovals = sqliteTable(
+  "runbook_approvals",
+  {
+    id: integer("id").primaryKey({ autoIncrement: true }),
+    runbookId: integer("runbook_id").notNull(),
+    fromApproval: text("from_approval").notNull(),
+    toApproval: text("to_approval").notNull(),
+    actor: text("actor").notNull(),
+    occurredAt: text("occurred_at").notNull(),
+  },
+  (table) => [
+    index("idx_runbook_approvals_runbook").on(table.runbookId, table.id),
+  ]
+);
+
 export const skillAssessments = sqliteTable(
   "skill_assessments",
   {
