@@ -1,38 +1,244 @@
 "use client";
-import { FormEvent, ReactNode, useEffect, useMemo, useState } from "react";
 
-type Engagement={id:number;customer:string;title:string;products:string;environment:string;architecture:string;status:string;owner:string;updatedAt:string;progress?:string;nextStep?:string;risk?:string};
-type Improvement={id:number;title:string;category:string;owner:string;impact:string;status:string;created_at:string};
-type Runbook={id:number;title:string;product:string;environment:string;architecture:string;approval:string;owner:string;reviewed_at:string;attachments:{id:number;fileName:string;contentType:string;sizeBytes:number}[]};
-type Assessment={id:number;engineer:string;skill:string;rating:string;evidence:string;updated_at:string};
-const statuses=["Not started","In progress","Awaiting customer","Blocked","Completed"];
-const nav=["My work","Team pulse","Insights","Runbook library","Improvements","Growth"];
-const date=(v?:string)=>v&&!Number.isNaN(new Date(v).getTime())?new Date(v).toLocaleDateString(undefined,{month:"short",day:"numeric",year:"numeric"}):"No updates yet";
-function Badge({status}:{status:string}){return <span className={`status ${status.toLowerCase().replaceAll(" ","-").replaceAll("/","")}`}>{status}</span>}
+import { useState } from "react";
+import { Sidebar } from "@/components/layout/Sidebar";
+import { Toasts } from "@/components/ui/Toasts";
+import { TeamPulse } from "@/components/sections/TeamPulse";
+import { MyWork } from "@/components/sections/MyWork";
+import { Insights } from "@/components/sections/Insights";
+import { RunbookLibrary } from "@/components/sections/RunbookLibrary";
+import { Growth, Improvements } from "@/components/sections/OperatingSections";
+import { UpdateModal } from "@/components/modals/UpdateModal";
+import { EngagementModal } from "@/components/modals/EngagementModal";
+import { OperatingModal } from "@/components/modals/OperatingModal";
+import { useDeliveryData } from "@/hooks/useDeliveryData";
+import { useToasts } from "@/hooks/useToasts";
+import { ApiError, send } from "@/lib/api-client";
+import type { OperatingRecordType } from "@/types/operating";
 
-export default function Home(){
- const [section,setSection]=useState("Team pulse"),[filter,setFilter]=useState("All"),[query,setQuery]=useState(""),[records,setRecords]=useState<Engagement[]>([]),[improvements,setImprovements]=useState<Improvement[]>([]),[runbooks,setRunbooks]=useState<Runbook[]>([]),[assessments,setAssessments]=useState<Assessment[]>([]),[loading,setLoading]=useState(true),[message,setMessage]=useState(""),[error,setError]=useState(""),[update,setUpdate]=useState<Engagement|null>(null),[newEngagement,setNewEngagement]=useState(false),[operatingForm,setOperatingForm]=useState<"improvements"|"runbooks"|"assessments"|null>(null);
- const load=async()=>{setLoading(true);setError("");try{const engagementResponse=await fetch("/api/engagements");if(!engagementResponse.ok)throw new Error("Your account does not have access to this Delivery Pulse workspace.");const e=await engagementResponse.json();setRecords(e.engagements??[]);const readOperating=async(type:string)=>{try{const response=await fetch(`/api/operating?type=${type}`);return response.ok?await response.json():{records:[]}}catch{return {records:[]}}};const [i,r,a]=await Promise.all([readOperating("improvements"),readOperating("runbooks"),readOperating("assessments")]);setImprovements(i.records??[]);setRunbooks(r.records??[]);setAssessments(a.records??[])}catch(e){setError(e instanceof Error?e.message:"Delivery Pulse could not load right now.")}finally{setLoading(false)}};
- useEffect(()=>{load()},[]);
- const shown=useMemo(()=>records.filter(x=>(filter==="All"||x.status===filter)&&`${x.customer} ${x.title} ${x.products} ${x.environment}`.toLowerCase().includes(query.toLowerCase())),[records,filter,query]);
- const count=(status:string)=>records.filter(x=>x.status===status).length;
- const weekly=()=>records.length?setUpdate(records[0]):setMessage("Create an engagement before submitting a weekly update.");
- async function save(path:string,payload:unknown,success:string){const r=await fetch(path,{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify(payload)});if(r.ok){setMessage(success);load();return true}setError("This record could not be saved. Please complete every field and try again.");return false}
- async function submitUpdate(e:FormEvent<HTMLFormElement>){e.preventDefault();if(update&&await save("/api/updates",{engagementId:update.id,status:new FormData(e.currentTarget).get("status"),progress:new FormData(e.currentTarget).get("progress"),nextStep:new FormData(e.currentTarget).get("nextStep"),risk:new FormData(e.currentTarget).get("risk"),submittedBy:"Pilot engineer"},"Weekly update submitted. Your team pulse is current."))setUpdate(null)}
- async function submitEngagement(e:FormEvent<HTMLFormElement>){e.preventDefault();if(await save("/api/engagements",Object.fromEntries(new FormData(e.currentTarget)),"Engagement created and ready for its first weekly update."))setNewEngagement(false)}
- async function submitOperating(e:FormEvent<HTMLFormElement>){e.preventDefault();if(!operatingForm)return;const form=new FormData(e.currentTarget);let ok=false;if(operatingForm==="runbooks"){form.set("type","runbooks");const response=await fetch("/api/operating",{method:"POST",body:form});ok=response.ok;if(!ok){const result=await response.json().catch(()=>null);setError(result?.error??"The runbook could not be saved.")}}else ok=await save("/api/operating",{type:operatingForm,...Object.fromEntries(form)},"Saved to the operating record.");if(ok){setOperatingForm(null);setMessage(operatingForm==="runbooks"?"Runbook saved. Its attachment is ready to download.":"Saved to the operating record.");load()}}
- async function removeRunbook(id:number){if(!window.confirm("Delete this runbook and its attachment?"))return;const response=await fetch(`/api/operating?type=runbooks&id=${id}`,{method:"DELETE"});if(response.ok){setMessage("Runbook removed.");load()}else setError("The runbook could not be removed.")}
- return <main className="app"><aside><div className="brand"><b>D</b><span>Delivery<br/><strong>Pulse</strong></span></div><p className="label">SOLUTION DELIVERY ENGINEERING</p><nav>{nav.map(x=><button className={x===section?"active":""} onClick={()=>{setSection(x);setQuery("")}} key={x}>{x}</button>)}</nav><div className="user"><i>KV</i><span><strong>Kshitij Vatsa</strong><small>Manager · SDE</small></span></div></aside><section className="body"><header><div><p className="label">PILOT WORKSPACE</p><h1>{section==="Team pulse"?"Your team, clearly in motion.":section}</h1></div><div><button className="secondary" onClick={()=>setNewEngagement(true)}>+ Engagement</button><button className="primary" onClick={weekly}>+ Weekly update</button></div></header>{message&&<Notice text={message} close={()=>setMessage("")}/>} {error&&<Notice text={error} error close={()=>setError("")}/>} 
- {section==="Team pulse"&&<><section className="signal"><div><p className="label">TEAM SIGNAL</p><h2>{count("Blocked")?"Delivery is steady. A blocker needs intervention.":"Delivery is moving without active blockers."}</h2><p>{records.length} engagements are tracked in the pilot. Weekly updates become the shared operating record.</p></div><div className="signalStats"><span><b>{records.filter(x=>x.status!=="Completed").length}</b>active items</span><span><b>{count("Blocked")}</b>blockers</span><span><b>{records.filter(x=>x.progress).length}</b>weekly updates</span></div></section><div className="metrics"><Card n={count("In progress")} t="In progress" foot="Active delivery"/><Card n={count("Awaiting customer")} t="Awaiting customer" foot="Follow-up due"/><Card n={count("Blocked")} t="Blocked" foot="Needs attention" red/><Card n={count("Completed")} t="Completed" foot="Delivery outcomes"/></div><section className="panel"><div className="heading"><div><h2>Engagement pulse</h2><p>Live state from submitted weekly updates</p></div><div className="filters">{["All",...statuses].map(x=><button className={filter===x?"selected":""} onClick={()=>setFilter(x)} key={x}>{x}</button>)}</div></div><div className="table"><div className="tr th"><span>ENGAGEMENT</span><span>STATUS</span><span>THIS WEEK</span><span>NEXT STEP</span><span>UPDATED</span></div>{loading?<p>Loading engagements…</p>:shown.map(x=><div className="tr" key={x.id}><span><strong>{x.customer}</strong><small>{x.title} · {x.environment} · {x.architecture}</small></span><span><Badge status={x.status}/></span><span>{x.progress??"No weekly update yet"}<small className={x.risk&&x.risk!=="None"?"risk":""}>{x.risk??""}</small></span><span>{x.nextStep??"Add the first weekly update"}</span><span>{date(x.updatedAt)}</span></div>)}{!loading&&!shown.length&&<p className="empty-row">No engagements match this status.</p>}</div></section><div className="two"><section className="panel"><p className="label">IMPROVEMENTS</p><h2>Make the next delivery easier.</h2><p>Capture documentation, process, automation, and knowledge contributions independently from customer work.</p><button className="secondary" onClick={()=>setSection("Improvements")}>Open improvements</button></section><section className="panel"><p className="label">TEAM DEVELOPMENT</p><h2>Architecture readiness</h2><p>Track separate capability evidence for HA, resiliency/DR, capacity sizing, cloud-native patterns, and distribution.</p><button className="secondary" onClick={()=>setSection("Growth")}>Open growth plan</button></section></div></>}
- {section==="My work"&&<Empty title="Keep the week current without daily reporting pressure." text="Open any engagement, add an optional note during the week, and submit one clear weekly update." action="Create weekly update" click={weekly}/>}
- {section==="Improvements"&&<OperatingList label="IMPROVEMENTS" title="Improvements that make the next delivery easier." description="Capture documentation, process, automation, and knowledge contributions with evidence of impact." action="+ Log improvement" onAdd={()=>setOperatingForm("improvements")} empty="No improvements recorded yet. Add the first contribution that helps the next delivery." rows={improvements.map(x=><div className="record" key={x.id}><span><strong>{x.title}</strong><small>{x.category} · {x.owner} · {date(x.created_at)}</small></span><span><Badge status={x.status}/><small>{x.impact}</small></span></div>)}/>}
- {section==="Insights"&&<div className="two"><section className="panel insight"><p className="label">PILOT METRICS</p><h2>Current delivery outcomes</h2><b>{count("Completed")} <small>completed engagements</small></b><div className="bars"><i/><i/><i/><i/><i/></div></section><section className="panel"><p className="label">RECURRING THEME</p><h2>Architecture readiness</h2><p>Once the pilot has four weeks of data, this view will surface repeated blockers, product coverage, and course recommendations.</p></section></div>}
- {section==="Runbook library"&&<OperatingList label="APPROVED KNOWLEDGE" title="Runbook library" description="Find customer-safe guidance by product, environment, and architecture." action="+ Add runbook" onAdd={()=>setOperatingForm("runbooks")} search={query} setSearch={setQuery} empty="No runbooks have been added yet. Add an approved command or a guide waiting for review." rows={runbooks.filter(x=>`${x.title} ${x.product} ${x.environment} ${x.architecture}`.toLowerCase().includes(query.toLowerCase())).map(x=><div className="runbook" key={x.id}><span><em className={x.approval==="Approved"?"approved":"review"}>{x.approval}</em><h3>{x.title}</h3><small>{x.product} · {x.environment} · {x.architecture}</small>{x.attachments?.map(a=><a className="attachment" href={`/api/attachments/${a.id}`} key={a.id}>Attachment: {a.fileName}</a>)}</span><span><small>{x.owner} · reviewed {date(x.reviewed_at)}</small><button className="text" onClick={()=>removeRunbook(x.id)}>Delete</button></span></div>)}/>}
- {section==="Growth"&&<OperatingList label="SKILL COVERAGE" title="Growth plan" description="Separate product and architecture ratings, grounded in delivery evidence." action="+ Add assessment" onAdd={()=>setOperatingForm("assessments")} empty="No skill assessments recorded yet. Add a rating with a concrete delivery example." rows={assessments.map(x=><div className="skill" key={x.id}><strong>{x.skill}<small>{x.engineer}</small></strong><em className={x.rating.toLowerCase()}>{x.rating}</em><small>{x.evidence}</small></div>)}/>} </section>{update&&<UpdateModal record={update} close={()=>setUpdate(null)} submit={submitUpdate}/>} {newEngagement&&<EngagementModal close={()=>setNewEngagement(false)} submit={submitEngagement}/>} {operatingForm&&<OperatingModal type={operatingForm} close={()=>setOperatingForm(null)} submit={submitOperating}/>}</main>}
-function Card({n,t,foot,red}:{n:number;t:string;foot:string;red?:boolean}){return <article><p>{t}</p><b>{n}</b><small className={red?"red":"green"}>{foot}</small></article>}
-function Notice({text,error,close}:{text:string;error?:boolean;close:()=>void}){return <div className={`notice${error?" error":""}`}>{text}<button onClick={close}>×</button></div>}
-function Empty({title,text,action,click}:{title:string;text:string;action:string;click:()=>void}){return <section className="panel empty"><p className="label">PERSONAL WORKSPACE</p><h2>{title}</h2><p>{text}</p><button className="primary" onClick={click}>{action}</button></section>}
-function OperatingList({label,title,description,action,onAdd,empty,rows,search,setSearch}:{label:string;title:string;description:string;action:string;onAdd:()=>void;empty:string;rows:ReactNode[];search?:string;setSearch?:(value:string)=>void}){return <section className="panel"><div className="heading"><div><p className="label">{label}</p><h2>{title}</h2><p>{description}</p><button className="secondary" onClick={onAdd}>{action}</button></div>{setSearch&&<input placeholder="Search runbooks" value={search} onChange={e=>setSearch(e.target.value)}/>}</div>{rows.length?rows:<p className="empty-row">{empty}</p>}</section>}
-function UpdateModal({record,close,submit}:{record:Engagement;close:()=>void;submit:(e:FormEvent<HTMLFormElement>)=>void}){return <div className="overlay"><form className="modal" onSubmit={submit}><button type="button" className="close" onClick={close}>×</button><p className="label">WEEKLY UPDATE · {record.customer.toUpperCase()}</p><h2>What materially changed this week?</h2><label>Progress<textarea name="progress" defaultValue={record.progress??""} required/></label><label>Current state<select name="status" defaultValue={record.status}>{statuses.map(x=><option key={x}>{x}</option>)}</select></label><label>Next step and owner<textarea name="nextStep" defaultValue={record.nextStep??""} required/></label><label>Risk / blocker<textarea name="risk" defaultValue={record.risk??"None"} required/></label><footer><button type="button" className="secondary" onClick={close}>Cancel</button><button className="primary">Submit weekly update</button></footer></form></div>}
-function EngagementModal({close,submit}:{close:()=>void;submit:(e:FormEvent<HTMLFormElement>)=>void}){return <div className="overlay"><form className="modal" onSubmit={submit}><button type="button" className="close" onClick={close}>×</button><p className="label">NEW ENGAGEMENT</p><h2>Add an engagement</h2><label>Customer<input name="customer" required/></label><label>Work title<input name="title" placeholder="e.g. Nexus Repository HA deployment" required/></label><label>Product(s)<input name="products" placeholder="Nexus Repository, IQ Server…" required/></label><label>Environment<select name="environment"><option>AWS</option><option>Azure</option><option>GCP</option><option>On-premises</option><option>Kubernetes</option><option>OpenShift</option></select></label><label>Architecture<select name="architecture"><option>Single node</option><option>HA</option><option>Resiliency / DR</option><option>Scalability / distribution</option><option>Migration / upgrade</option></select></label><label>Owner<input name="owner" placeholder="Engineer name" required/></label><footer><button type="button" className="secondary" onClick={close}>Cancel</button><button className="primary">Create engagement</button></footer></form></div>}
-function OperatingModal({type,close,submit}:{type:"improvements"|"runbooks"|"assessments";close:()=>void;submit:(e:FormEvent<HTMLFormElement>)=>void}){const title=type==="improvements"?"Log improvement":type==="runbooks"?"Add runbook":"Add skill assessment";return <div className="overlay"><form className="modal" onSubmit={submit}><button type="button" className="close" onClick={close}>×</button><p className="label">OPERATING RECORD</p><h2>{title}</h2>{type==="improvements"&&<><label>Improvement title<input name="title" required/></label><label>Category<select name="category"><option>Documentation</option><option>Process</option><option>Automation</option><option>Knowledge sharing</option></select></label><label>Owner<input name="owner" required/></label><label>Observed impact<textarea name="impact" required/></label></>}{type==="runbooks"&&<><label>Runbook title<input name="title" required/></label><label>Product<select name="product"><option>Nexus Repository</option><option>IQ Server</option><option>Lifecycle</option><option>Repository Firewall</option><option>SBOM</option></select></label><label>Environment<select name="environment"><option>AWS</option><option>Azure</option><option>GCP</option><option>On-premises</option><option>Kubernetes</option><option>OpenShift</option></select></label><label>Architecture<input name="architecture" placeholder="e.g. HA, installation, networking" required/></label><label>Owner / author<input name="owner" required/></label><label>Attachment <input name="attachment" type="file" accept=".pdf,.txt,.md,.doc,.docx,.xls,.xlsx,.csv,.yaml,.yml,.json"/><small>Optional · up to 10 MB</small></label></>}{type==="assessments"&&<><label>Engineer<input name="engineer" required/></label><label>Skill<input name="skill" placeholder="e.g. High availability" required/></label><label>Rating<select name="rating"><option>Learning</option><option>Working</option><option>Independent</option><option>Advanced</option></select></label><label>Delivery evidence<textarea name="evidence" required/></label></>}<footer><button type="button" className="secondary" onClick={close}>Cancel</button><button className="primary">Save record</button></footer></form></div>}
+export default function Home() {
+  const data = useDeliveryData();
+  const { toasts, success, error, dismiss } = useToasts();
+
+  const [section, setSection] = useState("Team pulse");
+  const [updateFor, setUpdateFor] = useState<number | null>(null);
+  const [newEngagement, setNewEngagement] = useState(false);
+  const [operatingForm, setOperatingForm] = useState<OperatingRecordType | null>(null);
+  const [pending, setPending] = useState(false);
+  const [fieldErrors, setFieldErrors] = useState<Record<string, string>>({});
+
+  /**
+   * Single submit path for every mutation: manages the in-flight flag, maps an
+   * ApiError's `fields` map onto inline messages, and reloads on success.
+   */
+  async function submit(
+    action: () => Promise<unknown>,
+    successMessage: string,
+    onDone?: () => void
+  ) {
+    setPending(true);
+    setFieldErrors({});
+    try {
+      await action();
+      success(successMessage);
+      onDone?.();
+      await data.reload();
+    } catch (caught) {
+      if (caught instanceof ApiError) {
+        setFieldErrors(caught.fields);
+        error(caught.message);
+      } else {
+        error("Something went wrong. Please try again.");
+      }
+    } finally {
+      setPending(false);
+    }
+  }
+
+  function openWeeklyUpdate(engagementId?: number) {
+    if (!data.engagements.length) {
+      error("Create an engagement before submitting a weekly update.");
+      return;
+    }
+    setFieldErrors({});
+    setUpdateFor(engagementId ?? data.engagements[0].id);
+  }
+
+  // A failed engagements fetch means no workspace access — nothing else renders.
+  if (data.fatalError && !data.loading) {
+    return (
+      <main className="app">
+        <section className="body">
+          <section className="panel empty">
+            <p className="label">DELIVERY PULSE</p>
+            <h2>We could not open this workspace.</h2>
+            <p>{data.fatalError}</p>
+            <button type="button" className="primary" onClick={() => void data.reload()}>
+              Try again
+            </button>
+          </section>
+        </section>
+      </main>
+    );
+  }
+
+  return (
+    <main className="app">
+      <Sidebar
+        section={section}
+        onSelect={setSection}
+        memberEmail={data.member?.email}
+        memberRole={data.member?.role}
+      />
+
+      <section className="body">
+        <header>
+          <div>
+            <p className="label">PILOT WORKSPACE</p>
+            <h1>
+              {section === "Team pulse" ? "Your team, clearly in motion." : section}
+            </h1>
+          </div>
+          <div>
+            <button
+              type="button"
+              className="secondary"
+              onClick={() => {
+                setFieldErrors({});
+                setNewEngagement(true);
+              }}
+            >
+              + Engagement
+            </button>
+            <button type="button" className="primary" onClick={() => openWeeklyUpdate()}>
+              + Weekly update
+            </button>
+          </div>
+        </header>
+
+        <Toasts toasts={toasts} dismiss={dismiss} />
+
+        {section === "Team pulse" && (
+          <TeamPulse
+            engagements={data.engagements}
+            loading={data.loading}
+            onOpenSection={setSection}
+          />
+        )}
+
+        {section === "My work" && (
+          <MyWork
+            engagements={data.engagements}
+            loading={data.loading}
+            memberEmail={data.member?.email}
+            onUpdate={openWeeklyUpdate}
+          />
+        )}
+
+        {section === "Insights" && (
+          <Insights engagements={data.engagements} runbooks={data.runbooks} />
+        )}
+
+        {section === "Runbook library" && (
+          <RunbookLibrary
+            runbooks={data.runbooks}
+            loading={data.loading}
+            canApprove={data.member?.canApprove ?? false}
+            onAdd={() => {
+              setFieldErrors({});
+              setOperatingForm("runbooks");
+            }}
+            onApprove={(id, approval) =>
+              void submit(
+                () => send(`/api/operating?type=runbooks&id=${id}`, { approval }, "PATCH"),
+                approval === "Approved"
+                  ? "Runbook approved and published to the library."
+                  : "Runbook sent back for review."
+              )
+            }
+            onDelete={(id) => {
+              if (!window.confirm("Delete this runbook and its attachment?")) return;
+              void submit(
+                () =>
+                  send(`/api/operating?type=runbooks&id=${id}`, undefined, "DELETE"),
+                "Runbook removed."
+              );
+            }}
+          />
+        )}
+
+        {section === "Improvements" && (
+          <Improvements
+            improvements={data.improvements}
+            loading={data.loading}
+            onAdd={() => {
+              setFieldErrors({});
+              setOperatingForm("improvements");
+            }}
+          />
+        )}
+
+        {section === "Growth" && (
+          <Growth
+            assessments={data.assessments}
+            loading={data.loading}
+            onAdd={() => {
+              setFieldErrors({});
+              setOperatingForm("assessments");
+            }}
+          />
+        )}
+      </section>
+
+      {updateFor !== null && (
+        <UpdateModal
+          engagements={data.engagements}
+          initialId={updateFor}
+          pending={pending}
+          fieldErrors={fieldErrors}
+          onClose={() => setUpdateFor(null)}
+          onSubmit={(payload) =>
+            void submit(
+              () => send("/api/updates", payload),
+              "Weekly update submitted. Your team pulse is current.",
+              () => setUpdateFor(null)
+            )
+          }
+        />
+      )}
+
+      {newEngagement && (
+        <EngagementModal
+          pending={pending}
+          fieldErrors={fieldErrors}
+          onClose={() => setNewEngagement(false)}
+          onSubmit={(payload) =>
+            void submit(
+              () => send("/api/engagements", payload),
+              "Engagement created and ready for its first weekly update.",
+              () => setNewEngagement(false)
+            )
+          }
+        />
+      )}
+
+      {operatingForm && (
+        <OperatingModal
+          type={operatingForm}
+          pending={pending}
+          fieldErrors={fieldErrors}
+          onClose={() => setOperatingForm(null)}
+          onSubmit={(form) =>
+            void submit(
+              () => send("/api/operating", form),
+              operatingForm === "runbooks"
+                ? "Runbook saved and queued for approval."
+                : "Saved to the operating record.",
+              () => setOperatingForm(null)
+            )
+          }
+        />
+      )}
+    </main>
+  );
+}

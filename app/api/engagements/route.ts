@@ -1,31 +1,78 @@
 import { env } from "cloudflare:workers";
 import { currentMember } from "@/lib/access";
+import {
+  accessDenied,
+  readBody,
+  validationFailed,
+  withErrorHandling,
+} from "@/lib/api-response";
+import { validate } from "@/lib/validation";
+import { ARCHITECTURES, ENVIRONMENTS } from "@/lib/constants/statuses";
 
-const schema = [
-  "CREATE TABLE IF NOT EXISTS engagements (id INTEGER PRIMARY KEY AUTOINCREMENT, customer TEXT NOT NULL, title TEXT NOT NULL, products TEXT NOT NULL, environment TEXT NOT NULL, architecture TEXT NOT NULL, status TEXT NOT NULL, owner TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL)",
-  "CREATE TABLE IF NOT EXISTS weekly_updates (id INTEGER PRIMARY KEY AUTOINCREMENT, engagement_id INTEGER NOT NULL, week_of TEXT NOT NULL, progress TEXT NOT NULL, next_step TEXT NOT NULL, risk TEXT NOT NULL, submitted_by TEXT NOT NULL, submitted_at TEXT NOT NULL)",
-  "CREATE INDEX IF NOT EXISTS idx_engagements_status_updated ON engagements(status, updated_at)",
-  "CREATE INDEX IF NOT EXISTS idx_weekly_updates_engagement_week ON weekly_updates(engagement_id, week_of)",
-  "CREATE TABLE IF NOT EXISTS improvements (id INTEGER PRIMARY KEY AUTOINCREMENT, title TEXT NOT NULL, category TEXT NOT NULL, owner TEXT NOT NULL, impact TEXT NOT NULL, status TEXT NOT NULL, created_at TEXT NOT NULL)",
-  "CREATE TABLE IF NOT EXISTS runbooks (id INTEGER PRIMARY KEY AUTOINCREMENT, title TEXT NOT NULL, product TEXT NOT NULL, environment TEXT NOT NULL, architecture TEXT NOT NULL, approval TEXT NOT NULL, owner TEXT NOT NULL, reviewed_at TEXT NOT NULL)",
-  "CREATE TABLE IF NOT EXISTS skill_assessments (id INTEGER PRIMARY KEY AUTOINCREMENT, engineer TEXT NOT NULL, skill TEXT NOT NULL, rating TEXT NOT NULL, evidence TEXT NOT NULL, updated_at TEXT NOT NULL)",
-];
+const ENGAGEMENT_SCHEMA = {
+  customer: { label: "Customer", maxLength: 120 },
+  title: { label: "Work title", maxLength: 200 },
+  products: { label: "Product(s)", maxLength: 200 },
+  environment: { label: "Environment", oneOf: ENVIRONMENTS },
+  architecture: { label: "Architecture", oneOf: ARCHITECTURES },
+  owner: { label: "Owner", maxLength: 120 },
+} as const;
 
-async function ready() { await env.DB.batch(schema.map((statement) => env.DB.prepare(statement))); }
-export async function GET(request: Request) {
-  if (!await currentMember(request)) return Response.json({ error: "Access denied" }, { status: 403 });
-  await ready();
-  const { results } = await env.DB.prepare("SELECT e.id, e.customer, e.title, e.products, e.environment, e.architecture, e.status, e.owner, e.created_at AS createdAt, e.updated_at AS updatedAt, w.progress, w.next_step AS nextStep, w.risk, w.submitted_at AS submittedAt FROM engagements e LEFT JOIN weekly_updates w ON w.id = (SELECT id FROM weekly_updates WHERE engagement_id = e.id ORDER BY submitted_at DESC LIMIT 1) ORDER BY CASE e.status WHEN 'Blocked' THEN 0 WHEN 'Awaiting customer' THEN 1 WHEN 'In progress' THEN 2 ELSE 3 END, e.updated_at DESC").all();
+// Ordered so the rows needing attention surface first, then most recent.
+const LIST_QUERY = `
+  SELECT e.id, e.customer, e.title, e.products, e.environment, e.architecture,
+         e.status, e.owner, e.created_at AS createdAt, e.updated_at AS updatedAt,
+         w.progress, w.next_step AS nextStep, w.risk, w.submitted_at AS submittedAt
+  FROM engagements e
+  LEFT JOIN weekly_updates w
+    ON w.id = (
+      SELECT id FROM weekly_updates
+      WHERE engagement_id = e.id
+      ORDER BY submitted_at DESC
+      LIMIT 1
+    )
+  ORDER BY CASE e.status
+             WHEN 'Blocked' THEN 0
+             WHEN 'Awaiting customer' THEN 1
+             WHEN 'In progress' THEN 2
+             ELSE 3
+           END,
+           e.updated_at DESC
+  LIMIT ?`;
+
+const MAX_ROWS = 500;
+
+export const GET = withErrorHandling(async (request: Request) => {
+  if (!(await currentMember(request))) return accessDenied();
+
+  const { results } = await env.DB.prepare(LIST_QUERY).bind(MAX_ROWS).all();
   return Response.json({ engagements: results });
-}
+});
 
-export async function POST(request: Request) {
-  if (!await currentMember(request)) return Response.json({ error: "Access denied" }, { status: 403 });
-  await ready();
-  const body = await request.json();
-  const required = ["customer", "title", "products", "environment", "architecture", "owner"];
-  if (required.some((key) => !String(body[key] ?? "").trim())) return Response.json({ error: "Complete all engagement fields." }, { status: 400 });
+export const POST = withErrorHandling(async (request: Request) => {
+  const member = await currentMember(request);
+  if (!member) return accessDenied();
+
+  const body = await readBody(request);
+  const { ok, data, errors } = validate(body, ENGAGEMENT_SCHEMA);
+  if (!ok) return validationFailed(errors);
+
   const now = new Date().toISOString();
-  const result = await env.DB.prepare("INSERT INTO engagements (customer,title,products,environment,architecture,status,owner,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?)").bind(body.customer,body.title,body.products,body.environment,body.architecture,"Not started",body.owner,now,now).run();
+  const result = await env.DB.prepare(
+    "INSERT INTO engagements (customer,title,products,environment,architecture,status,owner,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?)"
+  )
+    .bind(
+      data.customer,
+      data.title,
+      data.products,
+      data.environment,
+      data.architecture,
+      "Not started",
+      data.owner,
+      now,
+      now
+    )
+    .run();
+
   return Response.json({ id: result.meta.last_row_id }, { status: 201 });
-}
+});

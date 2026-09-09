@@ -1,70 +1,304 @@
 import { env } from "cloudflare:workers";
 import { currentMember } from "@/lib/access";
+import { canApprove } from "@/lib/authorization";
+import {
+  accessDenied,
+  fail,
+  notFound,
+  readBody,
+  validationFailed,
+  withErrorHandling,
+} from "@/lib/api-response";
+import { field, parseId, validate } from "@/lib/validation";
+import { ERROR_CODES } from "@/types/api";
+import {
+  ENVIRONMENTS,
+  IMPROVEMENT_CATEGORIES,
+  PRODUCTS,
+  RUNBOOK_APPROVAL_STATUS,
+  SKILL_RATINGS,
+} from "@/lib/constants/statuses";
+import {
+  MAX_ATTACHMENT_BYTES,
+  isAttachmentAllowed,
+  safeFileName,
+} from "@/lib/constants/attachments";
 
-const statements=[
-  "CREATE TABLE IF NOT EXISTS improvements (id INTEGER PRIMARY KEY AUTOINCREMENT, title TEXT NOT NULL, category TEXT NOT NULL, owner TEXT NOT NULL, impact TEXT NOT NULL, status TEXT NOT NULL, created_at TEXT NOT NULL)",
-  "CREATE TABLE IF NOT EXISTS runbooks (id INTEGER PRIMARY KEY AUTOINCREMENT, title TEXT NOT NULL, product TEXT NOT NULL, environment TEXT NOT NULL, architecture TEXT NOT NULL, approval TEXT NOT NULL, owner TEXT NOT NULL, reviewed_at TEXT NOT NULL)",
-  "CREATE TABLE IF NOT EXISTS skill_assessments (id INTEGER PRIMARY KEY AUTOINCREMENT, engineer TEXT NOT NULL, skill TEXT NOT NULL, rating TEXT NOT NULL, evidence TEXT NOT NULL, updated_at TEXT NOT NULL)",
-  "CREATE TABLE IF NOT EXISTS runbook_attachments (id INTEGER PRIMARY KEY AUTOINCREMENT, runbook_id INTEGER NOT NULL, object_key TEXT NOT NULL UNIQUE, file_name TEXT NOT NULL, content_type TEXT NOT NULL, size_bytes INTEGER NOT NULL, created_at TEXT NOT NULL)",
-  "CREATE INDEX IF NOT EXISTS idx_runbook_attachments_runbook_id ON runbook_attachments(runbook_id)",
-];
-async function ready(){await env.DB.batch(statements.map(x=>env.DB.prepare(x)))}
-const value=(data:FormData|Record<string,unknown>,key:string)=>data instanceof FormData?String(data.get(key)??"").trim():String(data[key]??"").trim();
+const IMPROVEMENT_SCHEMA = {
+  title: { label: "Improvement title", maxLength: 200 },
+  category: { label: "Category", oneOf: IMPROVEMENT_CATEGORIES },
+  owner: { label: "Owner", maxLength: 120 },
+  impact: { label: "Observed impact", maxLength: 2000 },
+} as const;
 
-export async function GET(request:Request){
-  if(!await currentMember(request))return Response.json({error:"Access denied"},{status:403});
-  await ready();
-  const type=new URL(request.url).searchParams.get("type");
-  if(type==="runbooks"){
-    const {results:runbooks}=await env.DB.prepare("SELECT * FROM runbooks ORDER BY reviewed_at DESC").all<Record<string,unknown>>();
-    const {results:attachments}=await env.DB.prepare("SELECT id, runbook_id AS runbookId, file_name AS fileName, content_type AS contentType, size_bytes AS sizeBytes FROM runbook_attachments ORDER BY id DESC").all<Record<string,unknown>>();
-    const byRunbook=new Map<number,Record<string,unknown>[]>();
-    for(const attachment of attachments){const id=Number(attachment.runbookId);byRunbook.set(id,[...(byRunbook.get(id)??[]),attachment]);}
-    return Response.json({records:runbooks.map(runbook=>({...runbook,attachments:byRunbook.get(Number(runbook.id))??[]}))});
-  }
-  const table=type==="improvements"?"improvements":"skill_assessments";
-  const order=table==="skill_assessments"?"updated_at":"created_at";
-  const {results}=await env.DB.prepare(`SELECT * FROM ${table} ORDER BY ${order} DESC`).all();
-  return Response.json({records:results});
-}
+const RUNBOOK_SCHEMA = {
+  title: { label: "Runbook title", maxLength: 200 },
+  product: { label: "Product", oneOf: PRODUCTS },
+  environment: { label: "Environment", oneOf: ENVIRONMENTS },
+  architecture: { label: "Architecture", maxLength: 160 },
+  owner: { label: "Owner / author", maxLength: 120 },
+} as const;
 
-export async function POST(request:Request){
-  if(!await currentMember(request))return Response.json({error:"Access denied"},{status:403});
-  await ready();
-  const multipart=request.headers.get("content-type")?.includes("multipart/form-data");
-  const body=multipart?await request.formData():await request.json() as Record<string,unknown>;
-  const type=value(body,"type"),now=new Date().toISOString();
-  if(type==="improvements"){
-    const fields=["title","category","owner","impact"];
-    if(fields.some(key=>!value(body,key)))return Response.json({error:"Complete all improvement fields."},{status:400});
-    await env.DB.prepare("INSERT INTO improvements (title,category,owner,impact,status,created_at) VALUES (?,?,?,?,?,?)").bind(value(body,"title"),value(body,"category"),value(body,"owner"),value(body,"impact"),"Proposed",now).run();
-  }else if(type==="runbooks"){
-    const fields=["title","product","environment","architecture","owner"];
-    if(fields.some(key=>!value(body,key)))return Response.json({error:"Complete all runbook fields."},{status:400});
-    const result=await env.DB.prepare("INSERT INTO runbooks (title,product,environment,architecture,approval,owner,reviewed_at) VALUES (?,?,?,?,?,?,?)").bind(value(body,"title"),value(body,"product"),value(body,"environment"),value(body,"architecture"),"Review needed",value(body,"owner"),now).run();
-    const attachment=body instanceof FormData?body.get("attachment"):null;
-    if(attachment&&typeof attachment!=="string"&&attachment.size>0){
-      if(attachment.size>10*1024*1024)return Response.json({error:"Attachments must be 10 MB or smaller."},{status:400});
-      const safeName=attachment.name.replace(/[^a-zA-Z0-9._-]/g,"_");
-      const objectKey=`runbooks/${result.meta.last_row_id}/${crypto.randomUUID()}-${safeName}`;
-      await env.FILES.put(objectKey,attachment.stream(),{httpMetadata:{contentType:attachment.type||"application/octet-stream",contentDisposition:`attachment; filename="${safeName}"`}});
-      await env.DB.prepare("INSERT INTO runbook_attachments (runbook_id,object_key,file_name,content_type,size_bytes,created_at) VALUES (?,?,?,?,?,?)").bind(result.meta.last_row_id,objectKey,attachment.name,attachment.type||"application/octet-stream",attachment.size,now).run();
+const ASSESSMENT_SCHEMA = {
+  engineer: { label: "Engineer", maxLength: 120 },
+  skill: { label: "Skill", maxLength: 160 },
+  rating: { label: "Rating", oneOf: SKILL_RATINGS },
+  evidence: { label: "Delivery evidence", maxLength: 2000 },
+} as const;
+
+// ---------------------------------------------------------------- GET
+
+export const GET = withErrorHandling(async (request: Request) => {
+  if (!(await currentMember(request))) return accessDenied();
+
+  const type = new URL(request.url).searchParams.get("type");
+
+  if (type === "runbooks") {
+    // Two queries + an in-memory join, rather than one row-per-attachment
+    // result set that the client would have to de-duplicate.
+    const [runbooks, attachments] = await Promise.all([
+      env.DB.prepare(
+        "SELECT id, title, product, environment, architecture, approval, owner, reviewed_at FROM runbooks ORDER BY reviewed_at DESC LIMIT 500"
+      ).all<Record<string, unknown>>(),
+      env.DB.prepare(
+        "SELECT id, runbook_id AS runbookId, file_name AS fileName, content_type AS contentType, size_bytes AS sizeBytes FROM runbook_attachments ORDER BY id DESC"
+      ).all<Record<string, unknown>>(),
+    ]);
+
+    const byRunbook = new Map<number, Record<string, unknown>[]>();
+    for (const attachment of attachments.results) {
+      const id = Number(attachment.runbookId);
+      const list = byRunbook.get(id);
+      if (list) list.push(attachment);
+      else byRunbook.set(id, [attachment]);
     }
-  }else if(type==="assessments"){
-    const fields=["engineer","skill","rating","evidence"];
-    if(fields.some(key=>!value(body,key)))return Response.json({error:"Complete all assessment fields."},{status:400});
-    await env.DB.prepare("INSERT INTO skill_assessments (engineer,skill,rating,evidence,updated_at) VALUES (?,?,?,?,?)").bind(value(body,"engineer"),value(body,"skill"),value(body,"rating"),value(body,"evidence"),now).run();
-  }else return Response.json({error:"Unknown record type."},{status:400});
-  return Response.json({ok:true},{status:201});
-}
 
-export async function DELETE(request:Request){
-  if(!await currentMember(request))return Response.json({error:"Access denied"},{status:403});
-  await ready();
-  const url=new URL(request.url),type=url.searchParams.get("type"),id=Number(url.searchParams.get("id"));
-  if(type!=="runbooks"||!Number.isInteger(id)||id<1)return Response.json({error:"A valid runbook is required."},{status:400});
-  const {results:attachments}=await env.DB.prepare("SELECT object_key AS objectKey FROM runbook_attachments WHERE runbook_id = ?").bind(id).all<{objectKey:string}>();
-  await Promise.all(attachments.map(attachment=>env.FILES.delete(attachment.objectKey)));
-  await env.DB.batch([env.DB.prepare("DELETE FROM runbook_attachments WHERE runbook_id = ?").bind(id),env.DB.prepare("DELETE FROM runbooks WHERE id = ?").bind(id)]);
-  return Response.json({ok:true});
-}
+    return Response.json({
+      records: runbooks.results.map((runbook: Record<string, unknown>) => ({
+        ...runbook,
+        attachments: byRunbook.get(Number(runbook.id)) ?? [],
+      })),
+    });
+  }
+
+  if (type === "improvements") {
+    const { results } = await env.DB.prepare(
+      "SELECT id, title, category, owner, impact, status, created_at FROM improvements ORDER BY created_at DESC LIMIT 500"
+    ).all();
+    return Response.json({ records: results });
+  }
+
+  if (type === "assessments") {
+    const { results } = await env.DB.prepare(
+      "SELECT id, engineer, skill, rating, evidence, updated_at FROM skill_assessments ORDER BY updated_at DESC LIMIT 500"
+    ).all();
+    return Response.json({ records: results });
+  }
+
+  return fail(ERROR_CODES.VALIDATION_FAILED, "Unknown record type.", 400);
+});
+
+// ---------------------------------------------------------------- POST
+
+export const POST = withErrorHandling(async (request: Request) => {
+  const member = await currentMember(request);
+  if (!member) return accessDenied();
+
+  const body = await readBody(request);
+  const type = field(body, "type");
+  const now = new Date().toISOString();
+
+  if (type === "improvements") {
+    const { ok, data, errors } = validate(body, IMPROVEMENT_SCHEMA);
+    if (!ok) return validationFailed(errors);
+
+    await env.DB.prepare(
+      "INSERT INTO improvements (title,category,owner,impact,status,created_at) VALUES (?,?,?,?,?,?)"
+    )
+      .bind(data.title, data.category, data.owner, data.impact, "Proposed", now)
+      .run();
+
+    return Response.json({ ok: true }, { status: 201 });
+  }
+
+  if (type === "runbooks") {
+    const { ok, data, errors } = validate(body, RUNBOOK_SCHEMA);
+    if (!ok) return validationFailed(errors);
+
+    const attachment = body instanceof FormData ? body.get("attachment") : null;
+    const hasFile =
+      attachment && typeof attachment !== "string" && attachment.size > 0;
+
+    // Validate the file BEFORE inserting the runbook row, so a rejected upload
+    // cannot leave a runbook behind that the user did not intend to create.
+    if (hasFile) {
+      const file = attachment as File;
+      if (file.size > MAX_ATTACHMENT_BYTES) {
+        return fail(
+          ERROR_CODES.FILE_TOO_LARGE,
+          "Attachments must be 10 MB or smaller.",
+          400,
+          { attachment: "This file is larger than 10 MB." }
+        );
+      }
+      if (!isAttachmentAllowed(file.name, file.type)) {
+        return fail(
+          ERROR_CODES.UNSUPPORTED_TYPE,
+          "That attachment type is not supported.",
+          400,
+          { attachment: "Use a PDF, document, spreadsheet, or text file." }
+        );
+      }
+    }
+
+    const result = await env.DB.prepare(
+      "INSERT INTO runbooks (title,product,environment,architecture,approval,owner,reviewed_at) VALUES (?,?,?,?,?,?,?)"
+    )
+      .bind(
+        data.title,
+        data.product,
+        data.environment,
+        data.architecture,
+        "Review needed",
+        data.owner,
+        now
+      )
+      .run();
+
+    const runbookId = Number(result.meta.last_row_id);
+
+    if (hasFile) {
+      const file = attachment as File;
+      const displayName = safeFileName(file.name);
+      const objectKey = `runbooks/${runbookId}/${crypto.randomUUID()}-${displayName}`;
+      const contentType = file.type || "application/octet-stream";
+
+      try {
+        await env.FILES.put(objectKey, file.stream(), {
+          httpMetadata: {
+            contentType,
+            contentDisposition: `attachment; filename="${displayName}"`,
+          },
+        });
+        await env.DB.prepare(
+          "INSERT INTO runbook_attachments (runbook_id,object_key,file_name,content_type,size_bytes,created_at) VALUES (?,?,?,?,?,?)"
+        )
+          .bind(runbookId, objectKey, displayName, contentType, file.size, now)
+          .run();
+      } catch (error) {
+        // Roll back both sides so we never leave a dangling R2 object or a
+        // runbook that claims an attachment it does not have.
+        console.error("Attachment upload failed, rolling back:", error);
+        await env.FILES.delete(objectKey).catch(() => {});
+        await env.DB.prepare("DELETE FROM runbooks WHERE id = ?")
+          .bind(runbookId)
+          .run();
+        return fail(
+          ERROR_CODES.SERVER_ERROR,
+          "The attachment could not be stored, so the runbook was not saved.",
+          502
+        );
+      }
+    }
+
+    return Response.json({ id: runbookId }, { status: 201 });
+  }
+
+  if (type === "assessments") {
+    const { ok, data, errors } = validate(body, ASSESSMENT_SCHEMA);
+    if (!ok) return validationFailed(errors);
+
+    await env.DB.prepare(
+      "INSERT INTO skill_assessments (engineer,skill,rating,evidence,updated_at) VALUES (?,?,?,?,?)"
+    )
+      .bind(data.engineer, data.skill, data.rating, data.evidence, now)
+      .run();
+
+    return Response.json({ ok: true }, { status: 201 });
+  }
+
+  return fail(ERROR_CODES.VALIDATION_FAILED, "Unknown record type.", 400);
+});
+
+// ---------------------------------------------------------------- PATCH
+
+/**
+ * Approve or send back a runbook. This closes the gap where every runbook was
+ * created as "Review needed" with no way to ever move it forward.
+ */
+export const PATCH = withErrorHandling(async (request: Request) => {
+  const member = await currentMember(request);
+  if (!member) return accessDenied();
+
+  const url = new URL(request.url);
+  if (url.searchParams.get("type") !== "runbooks") {
+    return fail(ERROR_CODES.VALIDATION_FAILED, "Unknown record type.", 400);
+  }
+
+  const id = parseId(url.searchParams.get("id"));
+  if (!id) return validationFailed({ id: "A valid runbook is required." });
+
+  const body = await readBody(request);
+  const approval = field(body, "approval");
+  if (!(RUNBOOK_APPROVAL_STATUS as readonly string[]).includes(approval)) {
+    return validationFailed({ approval: "Choose a valid approval state." });
+  }
+
+  if (!canApprove(member)) {
+    return fail(
+      ERROR_CODES.ACCESS_DENIED,
+      "Only a runbook approver can change approval state.",
+      403
+    );
+  }
+
+  const existing = await env.DB.prepare("SELECT id FROM runbooks WHERE id = ?")
+    .bind(id)
+    .first<{ id: number }>();
+  if (!existing) return notFound("That runbook no longer exists.");
+
+  await env.DB.prepare(
+    "UPDATE runbooks SET approval = ?, reviewed_at = ? WHERE id = ?"
+  )
+    .bind(approval, new Date().toISOString(), id)
+    .run();
+
+  return Response.json({ ok: true, approval });
+});
+
+// ---------------------------------------------------------------- DELETE
+
+export const DELETE = withErrorHandling(async (request: Request) => {
+  const member = await currentMember(request);
+  if (!member) return accessDenied();
+
+  const url = new URL(request.url);
+  if (url.searchParams.get("type") !== "runbooks") {
+    return fail(ERROR_CODES.VALIDATION_FAILED, "Unknown record type.", 400);
+  }
+
+  const id = parseId(url.searchParams.get("id"));
+  if (!id) return validationFailed({ id: "A valid runbook is required." });
+
+  const { results: attachments } = await env.DB.prepare(
+    "SELECT object_key AS objectKey FROM runbook_attachments WHERE runbook_id = ?"
+  )
+    .bind(id)
+    .all<{ objectKey: string }>();
+
+  // Remove DB rows first: an orphaned R2 object is recoverable waste, whereas a
+  // row pointing at a deleted object breaks every future download.
+  await env.DB.batch([
+    env.DB.prepare("DELETE FROM runbook_attachments WHERE runbook_id = ?").bind(id),
+    env.DB.prepare("DELETE FROM runbooks WHERE id = ?").bind(id),
+  ]);
+  await Promise.all(
+    attachments.map((attachment: { objectKey: string }) =>
+      env.FILES.delete(attachment.objectKey).catch((error: unknown) => {
+        console.error("Failed to delete R2 object", attachment.objectKey, error);
+      })
+    )
+  );
+
+  return Response.json({ ok: true });
+});
