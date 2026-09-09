@@ -152,9 +152,11 @@ into dependency-free modules (`lib/authorization.ts`,
   `D1Database`, and `Fetcher` types. `@cloudflare/workers-types` is not
   installed. The Vite plugin resolves these at build time, so the build and the
   full test suite pass regardless. Installing that package is the fix.
-- `package.json` lists `react-loading-skeleton`, which nothing imports.
-- Both `package-lock.json` and `pnpm-lock.yaml` are committed and can disagree
-  about the dependency tree. Pick one.
+- `package.json` lists `react-loading-skeleton`, which nothing imports. Removing
+  it needs a lockfile regeneration, so it is left for a run with registry access.
+- `npm` is the package manager: `package-lock.json` is the only lockfile.
+  `pnpm-workspace.yaml` remains but is inert under npm — it records only which
+  native builds (`esbuild`, `sharp`, `workerd`) this project expects.
 - No pagination: list endpoints cap at `LIMIT 500` and return everything under
   it. Fine at current scale, not indefinitely.
 - Deletes are hard deletes.
